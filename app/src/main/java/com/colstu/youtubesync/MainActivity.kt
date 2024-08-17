@@ -1,7 +1,8 @@
 package com.colstu.youtubesync
 
-
+import android.content.Context
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -53,10 +54,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.simulateHotReload
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -67,18 +70,27 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.colstu.youtubesync.data.DataManager
 import com.colstu.youtubesync.ui.theme.YoutubeSync
+import com.google.gson.JsonObject
 import kotlinx.coroutines.launch
-
+import java.io.File
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val userDataFile = File(filesDir, "user_data.json")
+
+        if (!userDataFile.exists()) {
+            val dm = DataManager(this)
+            dm.copyFileFromAssets(this, "user_data_ref.json", userDataFile)
+        }
         setContent {
             YoutubeSync {
                 Screen()
             }
         }
+
     }
 }
 
@@ -201,22 +213,23 @@ fun Screen() {
             },
             floatingActionButton = {
                 if (!showNewItemPage) {
-                FloatingActionButton(
-                    onClick = { showNewItemPage = true },
-                    containerColor = Color(0xFF2196F3),
-                    modifier = Modifier.padding(bottom = 30.dp, end = 10.dp)
-                ) {
-                    Icon(
-                        Icons.Filled.Add,
-                        contentDescription = "Add new item"
-                    )
+                    FloatingActionButton(
+                        onClick = { showNewItemPage = true },
+                        containerColor = Color(0xFF2196F3),
+                        modifier = Modifier.padding(bottom = 30.dp, end = 10.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Add,
+                            contentDescription = "Add new item"
+                        )
 
+                    }
+                } else {
+                    NewItemPage { showNewItemPage = false }
                 }
-                } else {NewItemPage{showNewItemPage = false}}
             },
         ) {
             Column(
-//body
                 modifier = Modifier
                     .padding(it)
                     .fillMaxWidth()
@@ -224,8 +237,6 @@ fun Screen() {
                     .verticalScroll(rememberScrollState()),
             ) {
                 ItemConstructor()
-
-
             }
         }
     }
@@ -233,10 +244,12 @@ fun Screen() {
 }
 
 @Composable
-fun NewItemPage(onClose: () -> Unit) {
+fun NewItemPage(onClose: (type: String) -> Unit) {
     var name by remember { mutableStateOf("") }
     var link by remember { mutableStateOf("") }
 
+    val context = LocalContext.current
+    val dataManager = DataManager(context)
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
@@ -285,7 +298,58 @@ fun NewItemPage(onClose: () -> Unit) {
                     .fillMaxWidth()
             ) {
                 Button(
-                    onClick = { onClose() },
+                    onClick = {
+                        val itemObject = dataManager.read(
+                            "user_data.json",
+                            JsonObject::class.java
+                        ) as? JsonObject
+                        Log.e("newItemPage read", itemObject.toString())
+                        var highestId = 0
+                        if (itemObject != null) {
+                            val itemJson = itemObject.getAsJsonObject("item")
+                            if (itemJson != null) {
+                                for (entry in itemJson.entrySet()) {
+                                    val currentId = entry.key.toIntOrNull()
+                                    if (currentId != null && currentId > highestId) {
+                                        highestId = currentId
+                                    }
+                                }
+                            }
+                        }
+
+                        // Add new object with incremented ID
+                        val newItemId = highestId + 1
+                        val newItem = JsonObject()
+                        newItem.addProperty("name", name)
+                        newItem.addProperty("link", link)
+                        newItem.addProperty("id", newItemId)
+                        newItem.addProperty("active", true)
+                        var obj: JsonObject
+                        if (itemObject != null) {
+                            obj = itemObject.deepCopy()
+                            val itemJson = obj.getAsJsonObject("item")
+                            if (itemJson != null) {
+                                itemJson.add(newItemId.toString(), newItem)
+                            } else {
+                                // Handle case where "item" object is missing in the data
+                                val newItemObject = JsonObject()
+                                newItemObject.add("item", newItem)
+                                obj = newItemObject
+                            }
+                        } else {
+                            // Handle case where user_data.json is empty or inaccessible
+                            val newItemObject = JsonObject()
+                            val itemJsonObject = JsonObject()
+                            itemJsonObject.add(newItemId.toString(), newItem)
+                            newItemObject.add("item", itemJsonObject)
+                            obj = newItemObject
+                        }
+
+                        dataManager.write("user_data.json", obj)
+                        Log.e("newItemPage write", obj.toString())
+                        simulateHotReload(context = context)
+                        onClose("add")//close
+                    },
                     shape = RoundedCornerShape(10.dp),
                     colors = ButtonDefaults.buttonColors(Color(0xFF389FF1)),
                     modifier = Modifier
@@ -297,10 +361,10 @@ fun NewItemPage(onClose: () -> Unit) {
                     Text(text = "Add", color = Color.White)
                 }
                 Button(
-                    onClick = { onClose() },
+                    onClick = { onClose("close") },
                     shape = RoundedCornerShape(10.dp),
                     colors = ButtonDefaults.buttonColors(Color(0xFFEC3636)),
-                    contentPadding =  PaddingValues(0.dp),
+                    contentPadding = PaddingValues(0.dp),
                     modifier = Modifier
                         .padding(0.dp, 0.dp, 15.dp, 15.dp)
                         .border(2.dp, Color.White, RoundedCornerShape(10.dp))
@@ -320,18 +384,41 @@ fun NewItemPage(onClose: () -> Unit) {
 }
 
 @Composable
-fun ItemConstructor() {
- ItemBox()
+fun ItemConstructor(
+    context: Context = LocalContext.current
+) {
+    val dataManager = DataManager(context)
+    val itemObject = dataManager.read("user_data.json", JsonObject::class.java)
+
+    if (itemObject != null) {
+
+        val itemMap = (itemObject as JsonObject)["item"] as JsonObject
+
+        for ((_, value) in itemMap.entrySet()) {
+            val itemJsonObject = value as JsonObject
+
+            val name = itemJsonObject.get("name").asString
+            val link = itemJsonObject.get("link").asString
+            val id = itemJsonObject.get("id").asInt
+            val isActive = itemJsonObject.get("active").asBoolean
+
+            ItemBox(name, link, id, isActive)
+        }
+    } else {
+        ItemBox("ERROR", "READ FILE", 0, false)
+    }
 }
+
 
 @Composable
 fun ItemBox(
     name: String = "Name",
-    link: String = "https://keegang.000.pe/home",
-    id: String = "0",
+    link: String = "https://example.com",
+    id: Int = 0,
     active: Boolean = true,
     onActiveChange: (Boolean) -> Unit = {},
 ) {
+    val context = LocalContext.current
     var switchState by remember { mutableStateOf(active) }
     Box(
         modifier = Modifier
@@ -381,7 +468,20 @@ fun ItemBox(
             IconButton(onClick = { /* TODO:Edit action */ }) {
                 Icon(imageVector = Icons.Filled.Create, contentDescription = "edit")
             }
-            IconButton(onClick = { /* TODO:Delete action */ }) {
+            IconButton(onClick = {
+                val dataManager = DataManager(context)
+                val itemObject = dataManager.read("user_data.json", JsonObject::class.java) as? JsonObject
+                Log.e("ItemBox read", itemObject.toString())
+                var obj: JsonObject
+                if (itemObject != null) {
+                    obj = itemObject.deepCopy()
+                    val itemJson = obj.getAsJsonObject("item")
+                    itemJson?.remove(id.toString())
+                    dataManager.write("user_data.json", obj)
+                    Log.e("ItemBox write", obj.toString())
+                    simulateHotReload(context = context)
+                }
+            }) {
                 Icon(imageVector = Icons.Filled.Delete, contentDescription = "delete")
             }
         }
@@ -454,3 +554,5 @@ fun HyperlinkText(
         }
     )
 }
+
+
